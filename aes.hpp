@@ -1,3 +1,6 @@
+#ifndef AES_CIPHER_CXX_H
+#define AES_CIPHER_CXX_H 1
+
 #pragma once
 #include <algorithm>
 #include <array>
@@ -7,6 +10,10 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <sstream>
+#include <iomanip>
+#include <cctype>
+#include <stdint.h>
 
 constexpr uint16_t AES128KS = 0x80;
 constexpr uint16_t AES192KS = 0xC0;
@@ -69,7 +76,6 @@ inline bool IsValidKeySize(size_t keylen) {
 
 // -- SBOX, INV SBOX, RCON, and helpers --
 namespace Detail {
-// S-Box table
 constexpr uint8_t sbox[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
     0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
@@ -104,8 +110,6 @@ constexpr uint8_t sbox[256] = {
     0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68,
     0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
 };
-
-// Inverse S-Box table
 constexpr uint8_t inv_sbox[256] = {
     0x52, 0x09, 0x6a, 0xd5, 0x30, 0x36, 0xa5, 0x38,
     0xbf, 0x40, 0xa3, 0x9e, 0x81, 0xf3, 0xd7, 0xfb,
@@ -140,8 +144,6 @@ constexpr uint8_t inv_sbox[256] = {
     0x17, 0x2b, 0x04, 0x7e, 0xba, 0x77, 0xd6, 0x26,
     0xe1, 0x69, 0x14, 0x63, 0x55, 0x21, 0x0c, 0x7d
 };
-
-
 constexpr byte Rcon[11] = {0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1B,0x36};
 
 inline void SubBytes(byte* state) {
@@ -338,12 +340,10 @@ inline void CFB_Encrypt(const Engine &aes, const std::vector<byte> &in, std::vec
             block[j] ^= keystream[j];
 
         out.insert(out.end(), block.begin(), block.end());
-        // Shift prev for next block
         prev.assign(block.begin(), block.end());
-        if (block_size < AES_BLOCK_SIZE) break; // done
+        if (block_size < AES_BLOCK_SIZE) break;
     }
 }
-
 inline void CFB_Decrypt(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
     std::vector<byte> prev(aes.iv);
     size_t len = in.size();
@@ -353,15 +353,14 @@ inline void CFB_Decrypt(const Engine &aes, const std::vector<byte> &in, std::vec
 
         size_t block_size = std::min(len - i, (size_t)AES_BLOCK_SIZE);
         std::vector<byte> block(in.begin() + i, in.begin() + i + block_size);
-        std::vector<byte> cipherblock(block); // keep original for chaining
+        std::vector<byte> cipherblock(block);
 
         for (size_t j = 0; j < block_size; ++j)
             block[j] ^= keystream[j];
 
         out.insert(out.end(), block.begin(), block.end());
-        // Shift prev for next block
         prev.assign(cipherblock.begin(), cipherblock.end());
-        if (block_size < AES_BLOCK_SIZE) break; // done
+        if (block_size < AES_BLOCK_SIZE) break;
     }
 }
 inline void OFB_Encrypt(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
@@ -381,8 +380,6 @@ inline void OFB_Encrypt(const Engine &aes, const std::vector<byte> &in, std::vec
         out.insert(out.end(), block.begin(), block.end());
     }
 }
-
-// OFB decryption is identical to encryption
 inline void OFB_Decrypt(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
     OFB_Encrypt(aes, in, out);
 }
@@ -401,56 +398,175 @@ inline void CTR_Encrypt(const Engine &aes, const std::vector<byte> &in, std::vec
 
         out.insert(out.end(), block.begin(), block.end());
 
-        // Increment counter (big-endian style)
         for (int k = AES_BLOCK_SIZE - 1; k >= 0; --k) {
             if (++counter[k]) break;
         }
     }
 }
-
-// CTR decryption is identical to encryption
 inline void CTR_Decrypt(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
     CTR_Encrypt(aes, in, out);
 }
 } // namespace Detail
 
-struct MODE {
-    static std::vector<byte> Encrypt(const std::string &plaintext, const std::string &key, Mode mode, std::vector<byte> iv = {}) {
-        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
-        std::vector<byte> keyvec(key.begin(), key.end());
-        if ((mode != Mode::ECB) && iv.empty()) iv = Utils::SecureIVBlock();
-        Engine aes(keyvec, mode, iv);
-        std::string padded = (mode == Mode::ECB || mode == Mode::CBC) ? Utils::PKCS7Pad(plaintext) : plaintext;
-        std::vector<byte> in(padded.begin(), padded.end());
-        std::vector<byte> out;
-        switch (mode) {
-            case Mode::ECB: Detail::ECB_Encrypt(aes, in, out); break;
-            case Mode::CBC: Detail::CBC_Encrypt(aes, in, out); break;
-            case Mode::CFB: Detail::CFB_Encrypt(aes, in, out); break;
-            case Mode::OFB: Detail::OFB_Encrypt(aes, in, out); break;
-            case Mode::CTR: Detail::CTR_Encrypt(aes, in, out); break;
-            default: throw std::invalid_argument("Unsupported AES mode");
+class Result {
+    std::vector<byte> data;
+public:
+    Result(std::vector<byte> dat) : data(std::move(dat)) {}
+    std::vector<byte> toVector() const {
+        return data;
+    }
+    std::string toString() const {
+        return std::string(data.begin(), data.end());
+    }
+    std::string toHex() const {
+        std::ostringstream oss;
+        for (auto b : data) {
+            oss << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
         }
+        return oss.str();
+    }
+    std::string toBase64() const {
+        static const char b64_table[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        std::string out;
+        int val=0, valb=-6;
+        for (byte c : data) {
+            val = (val<<8) + c;
+            valb += 8;
+            while (valb>=0) {
+                out.push_back(b64_table[(val>>valb)&0x3F]);
+                valb-=6;
+            }
+        }
+        if (valb>-6) out.push_back(b64_table[((val<<8)>>(valb+8))&0x3F]);
+        while (out.size()%4) out.push_back('=');
         return out;
     }
-
-    static std::vector<byte> Decrypt(const std::vector<byte> &ciphertext, const std::string &key, Mode mode, std::vector<byte> iv = {}) {
-        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
-        std::vector<byte> keyvec(key.begin(), key.end());
-        if ((mode != Mode::ECB) && iv.empty()) throw std::invalid_argument("IV required for this mode");
-        Engine aes(keyvec, mode, iv);
-        std::vector<byte> out;
-        switch (mode) {
-            case Mode::ECB: Detail::ECB_Decrypt(aes, ciphertext, out); break;
-            case Mode::CBC: Detail::CBC_Decrypt(aes, ciphertext, out); break;
-            case Mode::CFB: Detail::CFB_Decrypt(aes, ciphertext, out); break;
-            case Mode::OFB: Detail::OFB_Decrypt(aes, ciphertext, out); break;
-            case Mode::CTR: Detail::CTR_Decrypt(aes, ciphertext, out); break;
-            default: throw std::invalid_argument("Unsupported AES mode");
+    std::string toAscii() const {
+        std::string out;
+        for (byte b : data) {
+            if (std::isprint(b))
+                out += static_cast<char>(b);
+            else
+                out += '.';
         }
-        if (mode == Mode::ECB || mode == Mode::CBC) Utils::PKCS7Unpad(out);
         return out;
     }
 };
 
+// -------- Mode wrappers as structs --------
+struct ECB {
+    static Result Encrypt(const std::string &plaintext, const std::string &key) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::ECB, {});
+        std::string padded = Utils::PKCS7Pad(plaintext);
+        std::vector<byte> in(padded.begin(), padded.end());
+        std::vector<byte> out;
+        Detail::ECB_Encrypt(aes, in, out);
+        return Result(std::move(out));
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::ECB, {});
+        std::vector<byte> out;
+        Detail::ECB_Decrypt(aes, ciphertext, out);
+        Utils::PKCS7Unpad(out);
+        return Result(std::move(out));
+    }
+};
+
+struct CBC {
+    static Result Encrypt(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {}) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        if (iv.empty()) iv = Utils::SecureIVBlock();
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::CBC, iv);
+        std::string padded = Utils::PKCS7Pad(plaintext);
+        std::vector<byte> in(padded.begin(), padded.end());
+        std::vector<byte> out;
+        Detail::CBC_Encrypt(aes, in, out);
+        return Result(std::move(out));
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, std::vector<byte> iv) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        if (iv.empty()) throw std::invalid_argument("IV required for CBC mode");
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::CBC, iv);
+        std::vector<byte> out;
+        Detail::CBC_Decrypt(aes, ciphertext, out);
+        Utils::PKCS7Unpad(out);
+        return Result(std::move(out));
+    }
+};
+
+struct CFB {
+    static Result Encrypt(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {}) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        if (iv.empty()) iv = Utils::SecureIVBlock();
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::CFB, iv);
+        std::vector<byte> in(plaintext.begin(), plaintext.end());
+        std::vector<byte> out;
+        Detail::CFB_Encrypt(aes, in, out);
+        return Result(std::move(out));
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, std::vector<byte> iv) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        if (iv.empty()) throw std::invalid_argument("IV required for CFB mode");
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::CFB, iv);
+        std::vector<byte> out;
+        Detail::CFB_Decrypt(aes, ciphertext, out);
+        return Result(std::move(out));
+    }
+};
+
+struct OFB {
+    static Result Encrypt(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {}) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        if (iv.empty()) iv = Utils::SecureIVBlock();
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::OFB, iv);
+        std::vector<byte> in(plaintext.begin(), plaintext.end());
+        std::vector<byte> out;
+        Detail::OFB_Encrypt(aes, in, out);
+        return Result(std::move(out));
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, std::vector<byte> iv) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        if (iv.empty()) throw std::invalid_argument("IV required for OFB mode");
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::OFB, iv);
+        std::vector<byte> out;
+        Detail::OFB_Decrypt(aes, ciphertext, out);
+        return Result(std::move(out));
+    }
+};
+
+struct CTR {
+    static Result Encrypt(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {}) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        if (iv.empty()) iv = Utils::SecureIVBlock();
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::CTR, iv);
+        std::vector<byte> in(plaintext.begin(), plaintext.end());
+        std::vector<byte> out;
+        Detail::CTR_Encrypt(aes, in, out);
+        return Result(std::move(out));
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, std::vector<byte> iv) {
+        if (!IsValidKeySize(key.size())) throw std::invalid_argument("Invalid key size");
+        if (iv.empty()) throw std::invalid_argument("IV required for CTR mode");
+        std::vector<byte> keyvec(key.begin(), key.end());
+        Engine aes(keyvec, Mode::CTR, iv);
+        std::vector<byte> out;
+        Detail::CTR_Decrypt(aes, ciphertext, out);
+        return Result(std::move(out));
+    }
+};
+
 } // namespace AES
+
+#endif

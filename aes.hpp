@@ -743,10 +743,11 @@ struct ECB
         ECB_Encrypt_Serial(aes, in, out);
         return Result(std::move(out));
     }
-    static Result ParallelDecryption(const std::vector<byte> &ciphertext, const std::string &key)
+    static Result ParallelDecryption(const std::string &_ciphertext, const std::string &key)
     {
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
+        const std::vector<byte> ciphertext(_ciphertext.begin(), _ciphertext.end());
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::ECB, {});
         std::vector<byte> out;
@@ -765,27 +766,11 @@ struct ECB
         Utils::PKCS7Unpad(out);
         return Result(std::move(out));
     }
-    static Result Encrypt(const std::string &plaintext, const std::string &key)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key);
-#else
-        return SerialEncryption(plaintext, key);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key);
-#else
-        return SerialDecryption(ciphertext, key);
-#endif
-    }
+
 };
 
 struct CBC
 {
-    // String IV overloads
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
     {
         return ParallelEncryption(plaintext, key, IVToVector(iv));
@@ -802,24 +787,7 @@ struct CBC
     {
         return SerialDecryption(ciphertext, key, IVToVector(iv));
     }
-    static Result Encrypt(const std::string &plaintext, const std::string &key, const std::string &iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key, iv);
-#else
-        return SerialEncryption(plaintext, key, iv);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key, iv);
-#else
-        return SerialDecryption(ciphertext, key, iv);
-#endif
-    }
 
-    // Vector IV API
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
     {
         if (!Utils::IsValidKeySize(key.size()))
@@ -872,22 +840,7 @@ struct CBC
         Utils::PKCS7Unpad(out);
         return Result(std::move(out));
     }
-    static Result Encrypt(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key, iv);
-#else
-        return SerialEncryption(plaintext, key, iv);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, std::vector<byte> iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key, iv);
-#else
-        return SerialDecryption(ciphertext, key, iv);
-#endif
-    }
+
 };
 
 struct CFB
@@ -908,22 +861,7 @@ struct CFB
     {
         return SerialDecryption(ciphertext, key, IVToVector(iv));
     }
-    static Result Encrypt(const std::string &plaintext, const std::string &key, const std::string &iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key, iv);
-#else
-        return SerialEncryption(plaintext, key, iv);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key, iv);
-#else
-        return SerialDecryption(ciphertext, key, iv);
-#endif
-    }
+
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
     {
         if (!Utils::IsValidKeySize(key.size()))
@@ -972,22 +910,7 @@ struct CFB
         CFB_Decrypt_Serial(aes, ciphertext, out);
         return Result(std::move(out));
     }
-    static Result Encrypt(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key, iv);
-#else
-        return SerialEncryption(plaintext, key, iv);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, std::vector<byte> iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key, iv);
-#else
-        return SerialDecryption(ciphertext, key, iv);
-#endif
-    }
+
 };
 
 struct OFB
@@ -1008,22 +931,7 @@ struct OFB
     {
         return SerialDecryption(ciphertext, key, IVToVector(iv));
     }
-    static Result Encrypt(const std::string &plaintext, const std::string &key, const std::string &iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key, iv);
-#else
-        return SerialEncryption(plaintext, key, iv);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key, iv);
-#else
-        return SerialDecryption(ciphertext, key, iv);
-#endif
-    }
+
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
     {
         if (!Utils::IsValidKeySize(key.size()))
@@ -1072,22 +980,7 @@ struct OFB
         OFB_Decrypt_Serial(aes, ciphertext, out);
         return Result(std::move(out));
     }
-    static Result Encrypt(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key, iv);
-#else
-        return SerialEncryption(plaintext, key, iv);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, std::vector<byte> iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key, iv);
-#else
-        return SerialDecryption(ciphertext, key, iv);
-#endif
-    }
+
 };
 
 struct CTR
@@ -1108,22 +1001,7 @@ struct CTR
     {
         return SerialDecryption(ciphertext, key, IVToVector(iv));
     }
-    static Result Encrypt(const std::string &plaintext, const std::string &key, const std::string &iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key, iv);
-#else
-        return SerialEncryption(plaintext, key, iv);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key, iv);
-#else
-        return SerialDecryption(ciphertext, key, iv);
-#endif
-    }
+
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
     {
         if (!Utils::IsValidKeySize(key.size()))
@@ -1171,22 +1049,6 @@ struct CTR
         std::vector<byte> out;
         CTR_Decrypt_Serial(aes, ciphertext, out);
         return Result(std::move(out));
-    }
-    static Result Encrypt(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelEncryption(plaintext, key, iv);
-#else
-        return SerialEncryption(plaintext, key, iv);
-#endif
-    }
-    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, std::vector<byte> iv)
-    {
-#ifdef AES_ENABLE_PARALLEL_MODE
-        return ParallelDecryption(ciphertext, key, iv);
-#else
-        return SerialDecryption(ciphertext, key, iv);
-#endif
     }
 };
 

@@ -1,5 +1,5 @@
-#ifndef AES_C_FULL_H
-#define AES_C_FULL_H
+#ifndef AES_CIPHER_C_H
+#define AES_CIPHER_C_H
 
 // ======== Attribute Macros ========
 #if defined(__GNUC__) || defined(__clang__)

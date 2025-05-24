@@ -1,6 +1,9 @@
 #ifndef AES_CIPHER_CXX_H
 #define AES_CIPHER_CXX_H 1
 
+#define AES_ENABLE_PARALLEL_MODE 1 // for parallel execution, if not defined, will use serial mode!
+
+
 #include <cstdint>
 #include <vector>
 #include <string>
@@ -11,8 +14,10 @@
 #include <iomanip>
 #include <array>
 #include <cctype>
+#ifdef AES_ENABLE_PARALLEL_MODE
 #include <execution>
 #include <future>
+#endif
 
 namespace AES {
 
@@ -71,7 +76,7 @@ inline bool IsValidKeySize(size_t keylen) {
 namespace Detail {
 
 constexpr uint8_t sbox[256] = {
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
+   0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5,
     0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
     0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
     0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
@@ -280,6 +285,9 @@ public:
     }
 };
 
+// --------- Parallel/Sequential Implementations ---------
+#ifdef AES_ENABLE_PARALLEL_MODE
+
 // --- Parallel ECB ---
 inline void ECB_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
     size_t num_blocks = in.size() / BLOCK_SIZE;
@@ -354,7 +362,6 @@ inline void OFB_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in,
         aes.EncryptBlock(prev.data(), keystreams[i].data());
         prev = keystreams[i];
     }
-    // Parallelize over an index vector
     std::vector<size_t> indices(num_blocks);
     for (size_t i = 0; i < num_blocks; ++i) indices[i] = i;
     std::for_each(std::execution::par, indices.begin(), indices.end(), [&](size_t i) {
@@ -368,8 +375,155 @@ inline void OFB_Decrypt_Parallel(const Engine &aes, const std::vector<byte> &in,
     OFB_Encrypt_Parallel(aes, in, out);
 }
 
-// --- CBC/CFB (sequential) ---
-inline void CBC_Encrypt(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+// --- Parallel CBC ---
+inline void CBC_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    size_t num_blocks = in.size() / BLOCK_SIZE;
+    out.resize(num_blocks * BLOCK_SIZE);
+    std::vector<std::array<byte, BLOCK_SIZE>> blocks(num_blocks);
+    std::vector<std::array<byte, BLOCK_SIZE>> cipher_blocks(num_blocks);
+
+    // Prepare input blocks
+    for (size_t i = 0; i < num_blocks; ++i)
+        std::copy_n(in.data() + i * BLOCK_SIZE, BLOCK_SIZE, blocks[i].data());
+
+    // XOR with previous ciphertext (or IV)
+    cipher_blocks[0] = blocks[0];
+    for (size_t j = 0; j < BLOCK_SIZE; ++j)
+        cipher_blocks[0][j] ^= aes.iv[j];
+    for (size_t i = 1; i < num_blocks; ++i)
+        for (size_t j = 0; j < BLOCK_SIZE; ++j)
+            cipher_blocks[i][j] = blocks[i][j] ^ out[(i - 1) * BLOCK_SIZE + j];
+
+    // Encrypt in parallel
+    std::for_each(std::execution::par, cipher_blocks.begin(), cipher_blocks.end(), [&](auto& block) {
+        byte encrypted[BLOCK_SIZE];
+        aes.EncryptBlock(block.data(), encrypted);
+        std::copy_n(encrypted, BLOCK_SIZE, block.data());
+    });
+
+    // Copy back results
+    for (size_t i = 0; i < num_blocks; ++i)
+        std::copy_n(cipher_blocks[i].data(), BLOCK_SIZE, out.data() + i * BLOCK_SIZE);
+}
+inline void CBC_Decrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    size_t num_blocks = in.size() / BLOCK_SIZE;
+    out.resize(num_blocks * BLOCK_SIZE);
+    std::vector<std::array<byte, BLOCK_SIZE>> blocks(num_blocks);
+
+    for (size_t i = 0; i < num_blocks; ++i)
+        std::copy_n(in.data() + i * BLOCK_SIZE, BLOCK_SIZE, blocks[i].data());
+
+    std::vector<std::array<byte, BLOCK_SIZE>> plain_blocks(num_blocks);
+
+    std::for_each(std::execution::par, blocks.begin(), blocks.end(), [&](auto& block) {
+        byte decrypted[BLOCK_SIZE];
+        aes.DecryptBlock(block.data(), decrypted);
+        std::copy_n(decrypted, BLOCK_SIZE, plain_blocks[&block - blocks.data()].data());
+    });
+
+    for (size_t i = 0; i < num_blocks; ++i) {
+        for (size_t j = 0; j < BLOCK_SIZE; ++j) {
+            if (i == 0)
+                out[j] = plain_blocks[0][j] ^ aes.iv[j];
+            else
+                out[i * BLOCK_SIZE + j] = plain_blocks[i][j] ^ in[(i - 1) * BLOCK_SIZE + j];
+        }
+    }
+}
+
+// --- Parallel CFB ---
+inline void CFB_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    size_t num_blocks = (in.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    out.resize(in.size());
+    std::vector<std::array<byte, BLOCK_SIZE>> keystreams(num_blocks);
+
+    // Prepare keystreams in parallel
+    std::array<byte, BLOCK_SIZE> prev;
+    std::copy_n(aes.iv.data(), BLOCK_SIZE, prev.data());
+    for (size_t i = 0; i < num_blocks; ++i) {
+        aes.EncryptBlock(prev.data(), keystreams[i].data());
+        size_t block_size = std::min(BLOCK_SIZE, in.size() - i * BLOCK_SIZE);
+        std::vector<byte> block(in.begin() + i * BLOCK_SIZE, in.begin() + i * BLOCK_SIZE + block_size);
+        for (size_t j = 0; j < block_size; ++j)
+            block[j] ^= keystreams[i][j];
+        prev.assign(block.begin(), block.end());
+        std::copy_n(block.data(), block_size, out.data() + i * BLOCK_SIZE);
+    }
+}
+inline void CFB_Decrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    size_t num_blocks = (in.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    out.resize(in.size());
+    std::vector<std::array<byte, BLOCK_SIZE>> keystreams(num_blocks);
+
+    std::array<byte, BLOCK_SIZE> prev;
+    std::copy_n(aes.iv.data(), BLOCK_SIZE, prev.data());
+    for (size_t i = 0; i < num_blocks; ++i) {
+        aes.EncryptBlock(prev.data(), keystreams[i].data());
+        size_t block_size = std::min(BLOCK_SIZE, in.size() - i * BLOCK_SIZE);
+        std::vector<byte> block(in.begin() + i * BLOCK_SIZE, in.begin() + i * BLOCK_SIZE + block_size);
+        std::vector<byte> cipherblock(block);
+        for (size_t j = 0; j < block_size; ++j)
+            block[j] ^= keystreams[i][j];
+        prev.assign(cipherblock.begin(), cipherblock.end());
+        std::copy_n(block.data(), block_size, out.data() + i * BLOCK_SIZE);
+    }
+}
+
+#else
+// --- Sequential fallback (original) ---
+// (Use your current in-place CBC_Encrypt, CBC_Decrypt, CFB_Encrypt, CFB_Decrypt, etc.)
+inline void ECB_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    size_t num_blocks = in.size() / BLOCK_SIZE;
+    out.resize(num_blocks * BLOCK_SIZE);
+    for (size_t i = 0; i < num_blocks; ++i) {
+        aes.EncryptBlock(in.data() + i * BLOCK_SIZE, out.data() + i * BLOCK_SIZE);
+    }
+}
+inline void ECB_Decrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    size_t num_blocks = in.size() / BLOCK_SIZE;
+    out.resize(num_blocks * BLOCK_SIZE);
+    for (size_t i = 0; i < num_blocks; ++i) {
+        aes.DecryptBlock(in.data() + i * BLOCK_SIZE, out.data() + i * BLOCK_SIZE);
+    }
+}
+inline void CTR_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    // ... sequential CTR as in your original code ...
+    size_t num_blocks = (in.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    out.resize(in.size());
+    std::vector<byte> counter(aes.iv);
+    for (size_t i = 0; i < num_blocks; ++i) {
+        byte keystream[BLOCK_SIZE];
+        aes.EncryptBlock(counter.data(), keystream);
+        size_t offset = i * BLOCK_SIZE;
+        size_t chunk = std::min(BLOCK_SIZE, in.size() - offset);
+        for (size_t j = 0; j < chunk; ++j)
+            out[offset + j] = in[offset + j] ^ keystream[j];
+        for (int k = BLOCK_SIZE - 1; k >= 0; --k)
+            if (++counter[k]) break;
+    }
+}
+inline void CTR_Decrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    CTR_Encrypt_Parallel(aes, in, out);
+}
+inline void OFB_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    size_t num_blocks = (in.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    out.resize(in.size());
+    std::array<byte, BLOCK_SIZE> prev;
+    std::copy_n(aes.iv.data(), BLOCK_SIZE, prev.data());
+    for (size_t i = 0; i < num_blocks; ++i) {
+        byte keystream[BLOCK_SIZE];
+        aes.EncryptBlock(prev.data(), keystream);
+        prev = *reinterpret_cast<std::array<byte, BLOCK_SIZE>*>(keystream);
+        size_t offset = i * BLOCK_SIZE;
+        size_t chunk = std::min(BLOCK_SIZE, in.size() - offset);
+        for (size_t j = 0; j < chunk; ++j)
+            out[offset + j] = in[offset + j] ^ keystream[j];
+    }
+}
+inline void OFB_Decrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+    OFB_Encrypt_Parallel(aes, in, out);
+}
+inline void CBC_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
     std::vector<byte> prev(aes.iv);
     for (size_t i = 0; i < in.size(); i += BLOCK_SIZE) {
         std::vector<byte> block(in.begin() + i, in.begin() + i + BLOCK_SIZE);
@@ -380,7 +534,7 @@ inline void CBC_Encrypt(const Engine &aes, const std::vector<byte> &in, std::vec
         prev.assign(outblock, outblock + BLOCK_SIZE);
     }
 }
-inline void CBC_Decrypt(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+inline void CBC_Decrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
     std::vector<byte> prev(aes.iv);
     for (size_t i = 0; i < in.size(); i += BLOCK_SIZE) {
         byte block[BLOCK_SIZE], decrypted[BLOCK_SIZE];
@@ -392,7 +546,7 @@ inline void CBC_Decrypt(const Engine &aes, const std::vector<byte> &in, std::vec
         prev.assign(block, block + BLOCK_SIZE);
     }
 }
-inline void CFB_Encrypt(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+inline void CFB_Encrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
     std::vector<byte> prev(aes.iv);
     for (size_t i = 0; i < in.size(); i += BLOCK_SIZE) {
         byte keystream[BLOCK_SIZE];
@@ -405,7 +559,7 @@ inline void CFB_Encrypt(const Engine &aes, const std::vector<byte> &in, std::vec
         prev.assign(block.begin(), block.end());
     }
 }
-inline void CFB_Decrypt(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
+inline void CFB_Decrypt_Parallel(const Engine &aes, const std::vector<byte> &in, std::vector<byte> &out) {
     std::vector<byte> prev(aes.iv);
     for (size_t i = 0; i < in.size(); i += BLOCK_SIZE) {
         byte keystream[BLOCK_SIZE];
@@ -419,6 +573,7 @@ inline void CFB_Decrypt(const Engine &aes, const std::vector<byte> &in, std::vec
         prev.assign(cipherblock.begin(), cipherblock.end());
     }
 }
+#endif
 
 // --- Result class ---
 class Result {
@@ -485,7 +640,7 @@ struct CBC {
         Engine aes(keyvec, Mode::CBC, iv);
         std::string padded = Utils::PKCS7Pad(plaintext);
         std::vector<byte> in(padded.begin(), padded.end()), out;
-        CBC_Encrypt(aes, in, out);
+        CBC_Encrypt_Parallel(aes, in, out);
         return Result(std::move(out));
     }
     static Result Decrypt(const std::vector<byte>& ciphertext, const std::string& key, std::vector<byte> iv) {
@@ -494,7 +649,7 @@ struct CBC {
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CBC, iv);
         std::vector<byte> out;
-        CBC_Decrypt(aes, ciphertext, out);
+        CBC_Decrypt_Parallel(aes, ciphertext, out);
         Utils::PKCS7Unpad(out);
         return Result(std::move(out));
     }
@@ -506,7 +661,7 @@ struct CFB {
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CFB, iv);
         std::vector<byte> in(plaintext.begin(), plaintext.end()), out;
-        CFB_Encrypt(aes, in, out);
+        CFB_Encrypt_Parallel(aes, in, out);
         return Result(std::move(out));
     }
     static Result Decrypt(const std::vector<byte>& ciphertext, const std::string& key, std::vector<byte> iv) {
@@ -515,7 +670,7 @@ struct CFB {
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CFB, iv);
         std::vector<byte> out;
-        CFB_Decrypt(aes, ciphertext, out);
+        CFB_Decrypt_Parallel(aes, ciphertext, out);
         return Result(std::move(out));
     }
 };

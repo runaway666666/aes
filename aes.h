@@ -1,7 +1,6 @@
 #ifndef AES_CIPHER_C_H
 #define AES_CIPHER_C_H
 
-// ======== Attribute Macros ========
 #if defined(__GNUC__) || defined(__clang__)
 #define __attr_nodiscard __attribute__((warn_unused_result))
 #define __attr_malloc __attribute__((malloc))
@@ -38,6 +37,76 @@
 #include <string.h>
 #include <time.h>
 
+
+#ifdef AES_ENABLE_PARALLEL_MODES
+#include <pthread.h>
+#ifndef AES_PARALLEL_THREADS
+#define AES_PARALLEL_THREADS 4
+#endif
+
+typedef struct {
+    void *ctx;
+    const uint8_t *in;
+    uint8_t *out;
+    size_t len;
+    size_t thread_id;
+    size_t n_threads;
+    void (*blockfunc)(void *, const uint8_t *, uint8_t *);
+} aes_ecb_threadargs;
+
+static void *aes_ecb_thread_worker(void *arg_) {
+    aes_ecb_threadargs *arg = (aes_ecb_threadargs*)arg_;
+    size_t blocks = arg->len / 16;
+    for (size_t b = arg->thread_id; b < blocks; b += arg->n_threads) {
+        arg->blockfunc(arg->ctx, arg->in + b*16, arg->out + b*16);
+    }
+    return NULL;
+}
+
+// For CBC decryption: output block[i] = Dec(in[i]) ^ in[i-1], so can be parallelized
+typedef struct {
+    void *ctx;
+    const uint8_t *in;
+    uint8_t *out;
+    size_t len;
+    size_t thread_id;
+    size_t n_threads;
+    const uint8_t *iv;
+    void (*decblock)(void *, const uint8_t *, uint8_t *);
+} aes_cbc_dec_threadargs;
+
+static void *aes_cbc_dec_thread_worker(void *arg_) {
+    aes_cbc_dec_threadargs *arg = (aes_cbc_dec_threadargs*)arg_;
+    size_t blocks = arg->len / 16;
+    for (size_t b = arg->thread_id; b < blocks; b += arg->n_threads) {
+        uint8_t decout[16];
+        arg->decblock(arg->ctx, arg->in + b*16, decout);
+        const uint8_t *prev = (b == 0) ? arg->iv : (arg->in + (b-1)*16);
+        for (size_t j = 0; j < 16; ++j)
+            arg->out[b*16 + j] = decout[j] ^ prev[j];
+    }
+    return NULL;
+}
+
+// For CFB/OFB/CTR: all blocks independent, can be parallelized
+typedef struct {
+    void *ctx;
+    const uint8_t *in;
+    uint8_t *out;
+    size_t len;
+    size_t thread_id;
+    size_t n_threads;
+    const uint8_t *iv;
+    void (*blockfunc)(void *, const uint8_t *, uint8_t *, size_t, size_t, size_t, const uint8_t *);
+    } aes_stream_threadargs;
+
+static void *aes_stream_thread_worker(void *arg_) {
+    aes_stream_threadargs *arg = (aes_stream_threadargs*)arg_;
+    arg->blockfunc(arg->ctx, arg->in, arg->out, arg->len, arg->thread_id, arg->n_threads, arg->iv);
+    return NULL;
+}
+#endif
+
 #define AES128KS 0x80
 #define AES192KS 0xC0
 #define AES256KS 0x100
@@ -48,7 +117,6 @@
 
 typedef uint8_t byte;
 
-/* ===================== PRNG (Mersenne Twister) ===================== */
 #define PRNG_N 624
 #define PRNG_M 397
 #define PRNG_MATRIX_A 0x9908b0dfUL
@@ -100,7 +168,6 @@ __attr_nodiscard static inline uint32_t prng_rand(PRNG *__restrict__ prng, uint3
     return min + (y % (max - min + 1));
 }
 
-/* ===================== Galois Field & S-Box ===================== */
 __attr_nodiscard static inline byte gf_mul(byte a, byte b) __noexcept
 {
     byte p = 0;
@@ -166,11 +233,10 @@ static inline void create_rcon(byte rcon[256]) __noexcept
     }
 }
 
-/* ===================== AES Context & Key Expansion ===================== */
 typedef struct
 {
     int Nk, Nr, Nb;
-    byte round_keys[240]; // supports up to AES-256
+    byte round_keys[240];
     byte sbox[256];
     byte inv_sbox[256];
     byte rcon[256];
@@ -244,7 +310,6 @@ static inline void aes_key_expansion(aes_ctx *ctx, const byte *key) __noexcept
     }
 }
 
-/* ===================== Block Routines ===================== */
 static inline void aes_add_round_key(byte state[4][4], const byte *rk) __noexcept
 {
     for (int c = 0; c < 4; ++c)
@@ -269,20 +334,17 @@ static inline void aes_inv_sub_bytes(byte state[4][4], const byte invsbox[256]) 
 static inline void aes_shift_rows(byte state[4][4]) __noexcept
 {
     byte t;
-    // row 1
     t = state[1][0];
     state[1][0] = state[1][1];
     state[1][1] = state[1][2];
     state[1][2] = state[1][3];
     state[1][3] = t;
-    // row 2
     t = state[2][0];
     byte t2 = state[2][1];
     state[2][0] = state[2][2];
     state[2][1] = state[2][3];
     state[2][2] = t;
     state[2][3] = t2;
-    // row 3
     t = state[3][3];
     state[3][3] = state[3][2];
     state[3][2] = state[3][1];
@@ -293,20 +355,17 @@ static inline void aes_shift_rows(byte state[4][4]) __noexcept
 static inline void aes_inv_shift_rows(byte state[4][4]) __noexcept
 {
     byte t;
-    // row 1
     t = state[1][3];
     state[1][3] = state[1][2];
     state[1][2] = state[1][1];
     state[1][1] = state[1][0];
     state[1][0] = t;
-    // row 2
     t = state[2][0];
     byte t2 = state[2][1];
     state[2][0] = state[2][2];
     state[2][1] = state[2][3];
     state[2][2] = t;
     state[2][3] = t2;
-    // row 3
     t = state[3][0];
     state[3][0] = state[3][1];
     state[3][1] = state[3][2];
@@ -382,7 +441,6 @@ __attr_hot static inline void aes_decrypt_block(aes_ctx *ctx, const byte in[16],
             out[r + 4 * c] = state[r][c];
 }
 
-/* ===================== PKCS7 Padding ===================== */
 __attr_nodiscard static inline size_t pkcs7_pad(byte *buf, size_t len, size_t block_size) __noexcept
 {
     size_t pad = block_size - (len % block_size);
@@ -400,7 +458,6 @@ __attr_nodiscard static inline size_t pkcs7_unpad(byte *buf, size_t len) __noexc
     return len - pad;
 }
 
-/* ===================== Key/IV Generation ===================== */
 static inline void aes_gen_key(byte *key, size_t key_size) __noexcept
 {
     PRNG prng;
@@ -421,13 +478,50 @@ static inline void aes_gen_iv(byte *iv, size_t size) __noexcept
 /* ------- ECB ------- */
 __attr_hot static inline void aes_ecb_encrypt(aes_ctx *ctx, const byte *in, byte *out, size_t len) __noexcept
 {
+#ifdef AES_ENABLE_PARALLEL_MODES
+    pthread_t th[AES_PARALLEL_THREADS];
+    aes_ecb_threadargs args[AES_PARALLEL_THREADS];
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        args[t].ctx = ctx;
+        args[t].in = in;
+        args[t].out = out;
+        args[t].len = len;
+        args[t].thread_id = t;
+        args[t].n_threads = AES_PARALLEL_THREADS;
+        args[t].blockfunc = (void (*)(void *, const uint8_t *, uint8_t *))aes_encrypt_block;
+        pthread_create(&th[t], NULL, aes_ecb_thread_worker, &args[t]);
+    }
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        pthread_join(th[t], NULL);
+    }
+#else
     for (size_t i = 0; i < len; i += AES_BLOCK_SIZE)
         aes_encrypt_block(ctx, in + i, out + i);
+#endif
 }
+
 __attr_hot static inline void aes_ecb_decrypt(aes_ctx *ctx, const byte *in, byte *out, size_t len) __noexcept
 {
+#ifdef AES_ENABLE_PARALLEL_MODES
+    pthread_t th[AES_PARALLEL_THREADS];
+    aes_ecb_threadargs args[AES_PARALLEL_THREADS];
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        args[t].ctx = ctx;
+        args[t].in = in;
+        args[t].out = out;
+        args[t].len = len;
+        args[t].thread_id = t;
+        args[t].n_threads = AES_PARALLEL_THREADS;
+        args[t].blockfunc = (void (*)(void *, const uint8_t *, uint8_t *))aes_decrypt_block;
+        pthread_create(&th[t], NULL, aes_ecb_thread_worker, &args[t]);
+    }
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        pthread_join(th[t], NULL);
+    }
+#else
     for (size_t i = 0; i < len; i += AES_BLOCK_SIZE)
         aes_decrypt_block(ctx, in + i, out + i);
+#endif
 }
 
 /* ------- CBC ------- */
@@ -444,8 +538,28 @@ __attr_hot static inline void aes_cbc_encrypt(aes_ctx *ctx, const byte *in, byte
         memcpy(prev, out + i, 16);
     }
 }
+
+// CBC decryption can be parallelized
 __attr_hot static inline void aes_cbc_decrypt(aes_ctx *ctx, const byte *in, byte *out, size_t len, byte iv[16]) __noexcept
 {
+#ifdef AES_ENABLE_PARALLEL_MODES
+    pthread_t th[AES_PARALLEL_THREADS];
+    aes_cbc_dec_threadargs args[AES_PARALLEL_THREADS];
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        args[t].ctx = ctx;
+        args[t].in = in;
+        args[t].out = out;
+        args[t].len = len;
+        args[t].thread_id = t;
+        args[t].n_threads = AES_PARALLEL_THREADS;
+        args[t].iv = iv;
+        args[t].decblock = (void (*)(void *, const uint8_t *, uint8_t *))aes_decrypt_block;
+        pthread_create(&th[t], NULL, aes_cbc_dec_thread_worker, &args[t]);
+    }
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        pthread_join(th[t], NULL);
+    }
+#else
     byte prev[16];
     memcpy(prev, iv, 16);
     for (size_t i = 0; i < len; i += AES_BLOCK_SIZE)
@@ -456,11 +570,66 @@ __attr_hot static inline void aes_cbc_decrypt(aes_ctx *ctx, const byte *in, byte
             out[i + j] = block[j] ^ prev[j];
         memcpy(prev, in + i, 16);
     }
+#endif
 }
 
 /* ------- CFB ------- */
+static void aes_cfb_encrypt_parallel(
+    void *vctx, const uint8_t *in, uint8_t *out,
+    size_t len, size_t tid, size_t nthreads, const uint8_t *iv
+){
+    aes_ctx *ctx = (aes_ctx *)vctx;
+    size_t blocks = len / 16;
+    uint8_t prev[16];
+    for (size_t b = tid; b < blocks; b += nthreads) {
+        if (b == 0)
+            memcpy(prev, iv, 16);
+        else
+            memcpy(prev, out + (b - 1) * 16, 16);
+        uint8_t keystream[16];
+        aes_encrypt_block(ctx, prev, keystream);
+        for (size_t j = 0; j < 16; ++j)
+            out[b*16 + j] = in[b*16 + j] ^ keystream[j];
+    }
+}
+
+static void aes_cfb_decrypt_parallel(void *vctx, const uint8_t *in, uint8_t *out, size_t len, size_t tid, size_t nthreads, const uint8_t *iv)
+{
+    aes_ctx *ctx = (aes_ctx *)vctx;
+    size_t blocks = len / 16;
+    uint8_t prev[16];
+    for (size_t b = tid; b < blocks; b += nthreads) {
+        if (b == 0)
+            memcpy(prev, iv, 16);
+        else
+            memcpy(prev, in + (b - 1) * 16, 16);
+        uint8_t keystream[16];
+        aes_encrypt_block(ctx, prev, keystream);
+        for (size_t j = 0; j < 16; ++j)
+            out[b*16 + j] = in[b*16 + j] ^ keystream[j];
+    }
+}
+
 __attr_hot static inline void aes_cfb_encrypt(aes_ctx *ctx, const byte *in, byte *out, size_t len, byte iv[16]) __noexcept
 {
+#ifdef AES_ENABLE_PARALLEL_MODES
+    pthread_t th[AES_PARALLEL_THREADS];
+    aes_stream_threadargs args[AES_PARALLEL_THREADS];
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        args[t].ctx = ctx;
+        args[t].in = in;
+        args[t].out = out;
+        args[t].len = len;
+        args[t].thread_id = t;
+        args[t].n_threads = AES_PARALLEL_THREADS;
+        args[t].iv = iv;
+        args[t].blockfunc = aes_cfb_encrypt_parallel;
+        pthread_create(&th[t], NULL, aes_stream_thread_worker, &args[t]);
+    }
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        pthread_join(th[t], NULL);
+    }
+#else
     byte prev[16];
     memcpy(prev, iv, 16);
     for (size_t i = 0; i < len; i += AES_BLOCK_SIZE)
@@ -471,9 +640,29 @@ __attr_hot static inline void aes_cfb_encrypt(aes_ctx *ctx, const byte *in, byte
             out[i + j] = in[i + j] ^ keystream[j];
         memcpy(prev, out + i, 16);
     }
+#endif
 }
+
 __attr_hot static inline void aes_cfb_decrypt(aes_ctx *ctx, const byte *in, byte *out, size_t len, byte iv[16]) __noexcept
 {
+#ifdef AES_ENABLE_PARALLEL_MODES
+    pthread_t th[AES_PARALLEL_THREADS];
+    aes_stream_threadargs args[AES_PARALLEL_THREADS];
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        args[t].ctx = ctx;
+        args[t].in = in;
+        args[t].out = out;
+        args[t].len = len;
+        args[t].thread_id = t;
+        args[t].n_threads = AES_PARALLEL_THREADS;
+        args[t].iv = iv;
+        args[t].blockfunc = aes_cfb_decrypt_parallel;
+        pthread_create(&th[t], NULL, aes_stream_thread_worker, &args[t]);
+    }
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        pthread_join(th[t], NULL);
+    }
+#else
     byte prev[16];
     memcpy(prev, iv, 16);
     for (size_t i = 0; i < len; i += AES_BLOCK_SIZE)
@@ -484,9 +673,28 @@ __attr_hot static inline void aes_cfb_decrypt(aes_ctx *ctx, const byte *in, byte
             out[i + j] = in[i + j] ^ keystream[j];
         memcpy(prev, in + i, 16);
     }
+#endif
 }
 
 /* ------- OFB ------- */
+static void aes_ofb_parallel(void *vctx, const uint8_t *in, uint8_t *out, size_t len, size_t tid, size_t nthreads, const uint8_t *iv)
+{
+    aes_ctx *ctx = (aes_ctx *)vctx;
+    size_t blocks = len / 16;
+    uint8_t feedback[16];
+    for (size_t b = tid; b < blocks; b += nthreads) {
+        if (b == 0)
+            memcpy(feedback, iv, 16);
+        else
+            memcpy(feedback, out + (b - 1) * 16, 16);
+        uint8_t keystream[16];
+        aes_encrypt_block(ctx, feedback, keystream);
+        for (size_t j = 0; j < 16; ++j)
+            out[b*16 + j] = in[b*16 + j] ^ keystream[j];
+        memcpy(feedback, keystream, 16);
+    }
+}
+
 __attr_hot static inline void aes_ofb_encrypt(aes_ctx *ctx, const byte *in, byte *out, size_t len, byte iv[16]) __noexcept
 {
     byte feedback[16];
@@ -503,6 +711,25 @@ __attr_hot static inline void aes_ofb_encrypt(aes_ctx *ctx, const byte *in, byte
 #define aes_ofb_decrypt aes_ofb_encrypt
 
 /* ------- CTR ------- */
+static void aes_ctr_parallel(void *vctx, const uint8_t *in, uint8_t *out, size_t len, size_t tid, size_t nthreads, const uint8_t *nonce)
+{
+    aes_ctx *ctx = (aes_ctx *)vctx;
+    size_t blocks = len / 16;
+    for (size_t b = tid; b < blocks; b += nthreads) {
+        uint8_t counter[16];
+        memcpy(counter, nonce, 16);
+        for (int i = 15; i >= 0; --i) {
+            uint16_t x = counter[i] + (b & 0xFF);
+            counter[i] = x & 0xFF;
+            if (!(x & 0x100)) break;
+        }
+        uint8_t keystream[16];
+        aes_encrypt_block(ctx, counter, keystream);
+        for (size_t j = 0; j < 16; ++j)
+            out[b*16 + j] = in[b*16 + j] ^ keystream[j];
+    }
+}
+
 static inline void increment_counter(byte counter[16]) __noexcept
 {
     for (int i = 15; i >= 0; --i)
@@ -511,8 +738,27 @@ static inline void increment_counter(byte counter[16]) __noexcept
             break;
     }
 }
+
 __attr_hot static inline void aes_ctr_encrypt(aes_ctx *ctx, const byte *in, byte *out, size_t len, byte nonce[16]) __noexcept
 {
+#ifdef AES_ENABLE_PARALLEL_MODES
+    pthread_t th[AES_PARALLEL_THREADS];
+    aes_stream_threadargs args[AES_PARALLEL_THREADS];
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        args[t].ctx = ctx;
+        args[t].in = in;
+        args[t].out = out;
+        args[t].len = len;
+        args[t].thread_id = t;
+        args[t].n_threads = AES_PARALLEL_THREADS;
+        args[t].iv = nonce;
+        args[t].blockfunc = aes_ctr_parallel;
+        pthread_create(&th[t], NULL, aes_stream_thread_worker, &args[t]);
+    }
+    for (size_t t = 0; t < AES_PARALLEL_THREADS; ++t) {
+        pthread_join(th[t], NULL);
+    }
+#else
     byte counter[16];
     memcpy(counter, nonce, 16);
     for (size_t i = 0; i < len; i += AES_BLOCK_SIZE)
@@ -523,6 +769,7 @@ __attr_hot static inline void aes_ctr_encrypt(aes_ctx *ctx, const byte *in, byte
             out[i + j] = in[i + j] ^ keystream[j];
         increment_counter(counter);
     }
+#endif
 }
 #define aes_ctr_decrypt aes_ctr_encrypt
 

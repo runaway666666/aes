@@ -22,9 +22,9 @@ namespace AES
 {
 
 using byte = uint8_t;
-constexpr uint16_t AES128KS = 0x80;  // 128
-constexpr uint16_t AES192KS = 0xC0;  // 192
-constexpr uint16_t AES256KS = 0x100; // 256
+constexpr uint16_t AES128KS = 0x80 / 0x8;  // 128
+constexpr uint16_t AES192KS = 0xC0 / 0x8;  // 192
+constexpr uint16_t AES256KS = 0x100 / 0x8; // 256
 constexpr size_t BLOCK_SIZE = 16;
 
 enum class Mode
@@ -36,30 +36,50 @@ enum class Mode
     CTR
 };
 
+
+class SecureByteBlock {
+    std::vector<byte> data;
+public:
+    SecureByteBlock(std::vector<byte>&& d) : data(std::move(d)) {}
+    SecureByteBlock(const std::vector<byte>& d) : data(d) {}
+
+    std::string toString() const {
+        return std::string(data.begin(), data.end());
+    }
+    std::vector<byte> toVector() const {
+        return data;
+    }
+    size_t size() const {
+        return data.size();
+    }
+};
+
+class SecureByteGenerator {
+public:
+    static SecureByteBlock GenKeyBlock(size_t size) {
+        if (size != 16 && size != 24 && size != 32)
+            throw std::invalid_argument("Invalid AES key size (must be 16, 24, or 32 bytes)");
+        return SecureByteBlock(randomBytes(size));
+    }
+
+    static SecureByteBlock GenIvBlock(size_t size = 16) {
+        return SecureByteBlock(randomBytes(size));
+    }
+
+private:
+    static std::vector<byte> randomBytes(size_t size) {
+        std::vector<byte> buf(size);
+        std::random_device rd;
+        std::uniform_int_distribution<unsigned short> dis(0, 255);
+        for (auto& b : buf) b = static_cast<byte>(dis(rd));
+        return buf;
+    }
+};
+
+
+
 namespace Utils
 {
-
-inline std::string SecureKeyBlock(uint16_t key_size)
-{
-    if (key_size != AES128KS && key_size != AES256KS && key_size != AES192KS)
-        throw std::invalid_argument("invalid key size");
-    std::string seckey(key_size / 8, 0);
-    std::random_device rd;
-    std::uniform_int_distribution<unsigned short> dis(0, 255);
-    for (auto &ch : seckey)
-        ch = static_cast<char>(dis(rd));
-    return seckey;
-}
-
-inline std::vector<byte> SecureIVBlock(size_t size = BLOCK_SIZE)
-{
-    std::vector<byte> iv(size, 0);
-    std::random_device rd;
-    std::uniform_int_distribution<unsigned short> dis(0, 255);
-    for (auto &b : iv)
-        b = static_cast<byte>(dis(rd));
-    return iv;
-}
 
 inline std::string PKCS7Pad(const std::string &input, size_t blockSize = BLOCK_SIZE)
 {
@@ -82,7 +102,7 @@ inline void PKCS7Unpad(std::vector<byte> &data)
 }
 inline bool IsValidKeySize(size_t keylen)
 {
-    return keylen == (AES128KS / 8) || keylen == (AES192KS / 8) || keylen == (AES256KS / 8);
+    return keylen == (AES128KS) || keylen == (AES192KS) || keylen == (AES256KS);
 }
 
 } // namespace Utils
@@ -90,7 +110,6 @@ inline bool IsValidKeySize(size_t keylen)
 namespace Detail
 {
 
-// --- S-boxes and constants (unchanged, full content) ---
 constexpr uint8_t sbox[256] = {
     0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4,
     0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15, 0x04, 0xc7, 0x23, 0xc3,
@@ -639,7 +658,6 @@ inline void CTR_Decrypt_Serial(const Engine &aes, const std::vector<byte> &in, s
 {
     CTR_Encrypt_Serial(aes, in, out);
 }
-
 // --- Result class ---
 class Result
 {
@@ -695,6 +713,11 @@ class Result
 };
 
 // --- Mode structs with Parallel/Serial API ---
+
+inline std::vector<byte> IVToVector(const std::string &iv)
+{
+    return std::vector<byte>(iv.begin(), iv.end());
+}
 
 struct ECB
 {
@@ -762,12 +785,47 @@ struct ECB
 
 struct CBC
 {
+    // String IV overloads
+    static Result ParallelEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+        return ParallelEncryption(plaintext, key, IVToVector(iv));
+    }
+    static Result SerialEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+        return SerialEncryption(plaintext, key, IVToVector(iv));
+    }
+    static Result ParallelDecryption(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+        return ParallelDecryption(ciphertext, key, IVToVector(iv));
+    }
+    static Result SerialDecryption(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+        return SerialDecryption(ciphertext, key, IVToVector(iv));
+    }
+    static Result Encrypt(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+#ifdef AES_ENABLE_PARALLEL_MODE
+        return ParallelEncryption(plaintext, key, iv);
+#else
+        return SerialEncryption(plaintext, key, iv);
+#endif
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+#ifdef AES_ENABLE_PARALLEL_MODE
+        return ParallelDecryption(ciphertext, key, iv);
+#else
+        return SerialDecryption(ciphertext, key, iv);
+#endif
+    }
+
+    // Vector IV API
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
     {
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
         if (iv.empty())
-            iv = Utils::SecureIVBlock();
+            iv = SecureByteGenerator::GenIvBlock().toVector();
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CBC, iv);
         std::string padded = Utils::PKCS7Pad(plaintext);
@@ -780,7 +838,7 @@ struct CBC
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
         if (iv.empty())
-            iv = Utils::SecureIVBlock();
+            iv = SecureByteGenerator::GenIvBlock().toVector();
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CBC, iv);
         std::string padded = Utils::PKCS7Pad(plaintext);
@@ -834,12 +892,44 @@ struct CBC
 
 struct CFB
 {
+    static Result ParallelEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+        return ParallelEncryption(plaintext, key, IVToVector(iv));
+    }
+    static Result SerialEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+        return SerialEncryption(plaintext, key, IVToVector(iv));
+    }
+    static Result ParallelDecryption(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+        return ParallelDecryption(ciphertext, key, IVToVector(iv));
+    }
+    static Result SerialDecryption(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+        return SerialDecryption(ciphertext, key, IVToVector(iv));
+    }
+    static Result Encrypt(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+#ifdef AES_ENABLE_PARALLEL_MODE
+        return ParallelEncryption(plaintext, key, iv);
+#else
+        return SerialEncryption(plaintext, key, iv);
+#endif
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+#ifdef AES_ENABLE_PARALLEL_MODE
+        return ParallelDecryption(ciphertext, key, iv);
+#else
+        return SerialDecryption(ciphertext, key, iv);
+#endif
+    }
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
     {
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
         if (iv.empty())
-            iv = Utils::SecureIVBlock();
+            iv = SecureByteGenerator::GenIvBlock().toVector();
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CFB, iv);
         std::vector<byte> in(plaintext.begin(), plaintext.end()), out;
@@ -851,7 +941,7 @@ struct CFB
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
         if (iv.empty())
-            iv = Utils::SecureIVBlock();
+            iv = SecureByteGenerator::GenIvBlock().toVector();
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CFB, iv);
         std::vector<byte> in(plaintext.begin(), plaintext.end()), out;
@@ -902,12 +992,44 @@ struct CFB
 
 struct OFB
 {
+    static Result ParallelEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+        return ParallelEncryption(plaintext, key, IVToVector(iv));
+    }
+    static Result SerialEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+        return SerialEncryption(plaintext, key, IVToVector(iv));
+    }
+    static Result ParallelDecryption(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+        return ParallelDecryption(ciphertext, key, IVToVector(iv));
+    }
+    static Result SerialDecryption(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+        return SerialDecryption(ciphertext, key, IVToVector(iv));
+    }
+    static Result Encrypt(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+#ifdef AES_ENABLE_PARALLEL_MODE
+        return ParallelEncryption(plaintext, key, iv);
+#else
+        return SerialEncryption(plaintext, key, iv);
+#endif
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+#ifdef AES_ENABLE_PARALLEL_MODE
+        return ParallelDecryption(ciphertext, key, iv);
+#else
+        return SerialDecryption(ciphertext, key, iv);
+#endif
+    }
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
     {
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
         if (iv.empty())
-            iv = Utils::SecureIVBlock();
+            iv = SecureByteGenerator::GenIvBlock().toVector();
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::OFB, iv);
         std::vector<byte> in(plaintext.begin(), plaintext.end()), out;
@@ -919,7 +1041,7 @@ struct OFB
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
         if (iv.empty())
-            iv = Utils::SecureIVBlock();
+            iv = SecureByteGenerator::GenIvBlock().toVector();
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::OFB, iv);
         std::vector<byte> in(plaintext.begin(), plaintext.end()), out;
@@ -970,12 +1092,44 @@ struct OFB
 
 struct CTR
 {
+    static Result ParallelEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+        return ParallelEncryption(plaintext, key, IVToVector(iv));
+    }
+    static Result SerialEncryption(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+        return SerialEncryption(plaintext, key, IVToVector(iv));
+    }
+    static Result ParallelDecryption(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+        return ParallelDecryption(ciphertext, key, IVToVector(iv));
+    }
+    static Result SerialDecryption(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+        return SerialDecryption(ciphertext, key, IVToVector(iv));
+    }
+    static Result Encrypt(const std::string &plaintext, const std::string &key, const std::string &iv)
+    {
+#ifdef AES_ENABLE_PARALLEL_MODE
+        return ParallelEncryption(plaintext, key, iv);
+#else
+        return SerialEncryption(plaintext, key, iv);
+#endif
+    }
+    static Result Decrypt(const std::vector<byte> &ciphertext, const std::string &key, const std::string &iv)
+    {
+#ifdef AES_ENABLE_PARALLEL_MODE
+        return ParallelDecryption(ciphertext, key, iv);
+#else
+        return SerialDecryption(ciphertext, key, iv);
+#endif
+    }
     static Result ParallelEncryption(const std::string &plaintext, const std::string &key, std::vector<byte> iv = {})
     {
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
         if (iv.empty())
-            iv = Utils::SecureIVBlock();
+            iv = SecureByteGenerator::GenIvBlock().toVector();
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CTR, iv);
         std::vector<byte> in(plaintext.begin(), plaintext.end()), out;
@@ -987,7 +1141,7 @@ struct CTR
         if (!Utils::IsValidKeySize(key.size()))
             throw std::invalid_argument("Invalid key size");
         if (iv.empty())
-            iv = Utils::SecureIVBlock();
+            iv = SecureByteGenerator::GenIvBlock().toVector();
         std::vector<byte> keyvec(key.begin(), key.end());
         Engine aes(keyvec, Mode::CTR, iv);
         std::vector<byte> in(plaintext.begin(), plaintext.end()), out;
